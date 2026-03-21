@@ -26,50 +26,20 @@ window.baton-window,
 /* ── Title bar ─────────────────────────────────────────────────────────── */
 
 .baton-titlebar {
-    background-color: alpha(#ffffff, 0.03);
-    border-bottom: 1px solid alpha(#ffffff, 0.06);
-    padding: 6px 12px 5px 12px;
-    border-radius: 9px 9px 0 0;
+    padding: 3px 6px;
+    border-radius: 9px;
 }
 
-.baton-titlebar label {
-    font-family: "Inter", "Segoe UI", sans-serif;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    color: alpha(#a0a0b8, 0.70);
-}
-
-.baton-title-count {
-    font-family: "JetBrains Mono", "Fira Code", monospace;
-    font-size: 10px;
-    font-weight: 400;
-    color: alpha(#6060a0, 0.80);
-    padding-left: 4px;
-}
-
-/* Compact dots shown when collapsed */
+/* Compact dots — the entire collapsed view */
 .baton-dots {
-    font-size: 10px;
-    padding-left: 4px;
-    letter-spacing: 0.15em;
+    font-size: 11px;
+    letter-spacing: 0.2em;
 }
 
-.baton-close {
-    background: none;
-    border: none;
-    box-shadow: none;
-    min-width: 18px;
-    min-height: 18px;
-    padding: 0 3px;
-    font-size: 12px;
-    font-weight: 700;
-    color: alpha(#a0a0b8, 0.40);
-    transition: color 120ms ease;
-}
+/* ── Body (expanded) ───────────────────────────────────────────────────── */
 
-.baton-close:hover {
-    color: alpha(#ff5f5f, 0.90);
+.baton-body {
+    min-width: 500px;
 }
 
 /* ── Session rows (two-line layout) ────────────────────────────────────── */
@@ -97,11 +67,11 @@ window.baton-window,
     min-width: 24px;
 }
 
-/* Per-task colors */
-.task1 .session-task { color: #6ec1e4; }
-.task2 .session-task { color: #b48ead; }
-.task3 .session-task { color: #a3be8c; }
-.task4 .session-task { color: #ebcb8b; }
+/* Per-task colors (gruvbox accents from nixos theme) */
+.task1 .session-task { color: #689d6a; }  /* green */
+.task2 .session-task { color: #d79921; }  /* yellow */
+.task3 .session-task { color: #458588; }  /* blue */
+.task4 .session-task { color: #b16286; }  /* magenta */
 
 /* Name — primary identifier */
 .session-name {

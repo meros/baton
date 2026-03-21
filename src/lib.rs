@@ -4,6 +4,8 @@ pub mod sway;
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::fs;
+use std::time::SystemTime;
 
 pub struct SessionInfo {
     pub name: String,
@@ -50,25 +52,44 @@ impl SessionStatus {
             SessionStatus::Working => "working".to_string(),
             SessionStatus::Idle(dur) => {
                 let mins = dur.num_minutes();
-                let label = if mins < 1 {
-                    String::new()
-                } else if mins < 60 {
-                    format!("{mins}m")
-                } else if mins < 1440 {
-                    format!("{}h", mins / 60)
-                } else {
-                    format!("{}d", mins / 1440)
-                };
-                if label.is_empty() {
+                if mins < 1 {
                     "idle".to_string()
+                } else if mins < 60 {
+                    format!("idle {mins}m")
+                } else if mins < 1440 {
+                    format!("idle {}h", mins / 60)
                 } else {
-                    format!("idle {label}")
+                    format!("idle {}d", mins / 1440)
                 }
             }
             SessionStatus::Stuck => "stuck".to_string(),
             SessionStatus::Stopped => "stopped".to_string(),
         }
     }
+}
+
+/// Read baton hook state file for a given cwd.
+/// Written by ~/.claude/hooks/baton-status.sh
+/// Format: line 1 = "working"|"idle", line 2 = tool name, line 3 = session_id
+fn read_hook_status(cwd: &str) -> Option<(String, Option<String>)> {
+    let state_dir = dirs::home_dir()?.join(".local/state/baton");
+    let key = cwd.replace('/', "-");
+    let path = state_dir.join(&key);
+
+    let content = fs::read_to_string(&path).ok()?;
+    let mut lines = content.lines();
+    let status = lines.next()?.to_string();
+    let tool = lines.next().map(|s| s.to_string()).filter(|s| !s.is_empty());
+
+    // Also check the file's mtime — if the status file is stale (>60s),
+    // don't trust it (session may have crashed without writing "idle")
+    let mtime = fs::metadata(&path).ok()?.modified().ok()?;
+    let age = SystemTime::now().duration_since(mtime).ok()?;
+    if age.as_secs() > 120 {
+        return None; // stale, ignore
+    }
+
+    Some((status, tool))
 }
 
 pub fn gather_sessions() -> Result<Vec<SessionInfo>> {
@@ -78,7 +99,6 @@ pub fn gather_sessions() -> Result<Vec<SessionInfo>> {
         .join(".claude")
         .join("projects");
 
-    // Build sway PID→workspace map once
     let pid_ws_map = sway::build_pid_workspace_map();
 
     let mut sessions = Vec::new();
@@ -90,26 +110,65 @@ pub fn gather_sessions() -> Result<Vec<SessionInfo>> {
         }
         seen_cwds.insert(proc.cwd.clone(), true);
 
+        // Primary signal: hook state file
+        let hook_status = read_hook_status(&proc.cwd);
+
+        // Parse JSONL for "doing" text, branch, stuck detection
         let session_data = session::find_latest_session(&claude_home, &proc.cwd);
 
-        let (status, doing, session_id, branch, activity_log) = match session_data {
-            Some(data) => {
-                let status = infer_status(&data, true);
-                let doing = data.last_doing.unwrap_or_default();
-                (
-                    status,
-                    doing,
-                    data.session_id,
-                    data.branch,
-                    Some(data.activity_log),
-                )
+        let (doing, session_id, branch, activity_log, repeated_edits, has_subagents) =
+            match &session_data {
+                Some(data) => (
+                    data.last_doing.clone().unwrap_or_default(),
+                    data.session_id.clone(),
+                    data.branch.clone(),
+                    Some(data.activity_log.clone()),
+                    data.repeated_edits,
+                    data.has_active_subagents,
+                ),
+                None => (String::new(), None, None, None, 0, false),
+            };
+
+        // Determine status from hook state (primary) or fallback to file mtime
+        // Subagents override: if subagents are active, session is working regardless
+        let status = if repeated_edits >= 3 {
+            SessionStatus::Stuck
+        } else if has_subagents {
+            SessionStatus::Working
+        } else if let Some((ref hook_state, _)) = hook_status {
+            match hook_state.as_str() {
+                "working" => SessionStatus::Working,
+                "idle" => {
+                    let state_dir = dirs::home_dir()
+                        .unwrap()
+                        .join(".local/state/baton");
+                    let key = proc.cwd.replace('/', "-");
+                    let idle_secs = fs::metadata(state_dir.join(&key))
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|mt| SystemTime::now().duration_since(mt).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    SessionStatus::Idle(chrono::Duration::seconds(idle_secs as i64))
+                }
+                _ => SessionStatus::Working,
             }
-            None => (SessionStatus::Working, String::new(), None, None, None),
+        } else {
+            // No hook state — fallback to JSONL mtime
+            let project_dir_name = proc.cwd.replace('/', "-");
+            let project_dir = claude_home.join(&project_dir_name);
+            let idle_secs = latest_jsonl_mtime(&project_dir)
+                .and_then(|mt| SystemTime::now().duration_since(mt).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if idle_secs < 15 {
+                SessionStatus::Working
+            } else {
+                SessionStatus::Idle(chrono::Duration::seconds(idle_secs as i64))
+            }
         };
 
-        // Find task info for this process
         let task_info = sway::find_task_for_pid(proc.pid, &pid_ws_map);
-
         let name = derive_name(&proc.cwd, branch.as_deref());
 
         sessions.push(SessionInfo {
@@ -127,7 +186,6 @@ pub fn gather_sessions() -> Result<Vec<SessionInfo>> {
         });
     }
 
-    // Sort by task number first, then name
     sessions.sort_by(|a, b| {
         a.task_num
             .unwrap_or(99)
@@ -137,23 +195,16 @@ pub fn gather_sessions() -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
-fn infer_status(data: &session::SessionData, process_alive: bool) -> SessionStatus {
-    if !process_alive {
-        return SessionStatus::Stopped;
-    }
-
-    let now = chrono::Utc::now();
-    let idle_duration = now - data.last_activity;
-
-    if data.repeated_edits >= 3 {
-        return SessionStatus::Stuck;
-    }
-
-    if idle_duration > chrono::Duration::minutes(2) {
-        return SessionStatus::Idle(idle_duration);
-    }
-
-    SessionStatus::Working
+fn latest_jsonl_mtime(project_dir: &std::path::Path) -> Option<SystemTime> {
+    std::fs::read_dir(project_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.ends_with(".jsonl") && !name.starts_with("agent-")
+        })
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max()
 }
 
 fn derive_name(cwd: &str, branch: Option<&str>) -> String {
@@ -174,17 +225,21 @@ pub fn shorten_path(path: &str, max_len: usize) -> String {
         Some(h) if path.starts_with(h.as_str()) => format!("~{}", &path[h.len()..]),
         _ => path.to_string(),
     };
-    if shortened.len() <= max_len {
+    let char_count = shortened.chars().count();
+    if char_count <= max_len {
         shortened
     } else {
-        format!("…{}", &shortened[shortened.len() - max_len + 1..])
+        let skip = char_count - max_len + 1;
+        let tail: String = shortened.chars().skip(skip).collect();
+        format!("…{tail}")
     }
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{truncated}…")
     }
 }

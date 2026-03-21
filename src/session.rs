@@ -6,15 +6,18 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+#[derive(Clone)]
 pub struct SessionData {
     pub session_id: Option<String>,
     pub branch: Option<String>,
     pub last_activity: DateTime<Utc>,
     pub last_doing: Option<String>,
     pub repeated_edits: usize,
+    pub has_active_subagents: bool,
     pub activity_log: Vec<ActivityEntry>,
 }
 
+#[derive(Clone)]
 pub struct ActivityEntry {
     pub time: DateTime<Utc>,
     pub kind: String,
@@ -52,7 +55,63 @@ pub fn find_latest_session(claude_projects: &Path, cwd: &str) -> Option<SessionD
     });
 
     let latest = jsonl_files.last()?;
-    parse_session_file(&latest.path())
+    let mut data = parse_session_file(&latest.path())?;
+
+    // Check for active subagents: look in <session-id>/subagents/ for recently modified files
+    if let Some(ref sid) = data.session_id {
+        data.has_active_subagents = has_active_subagents(&project_dir, sid);
+    }
+
+    Some(data)
+}
+
+/// Check if any subagent JSONL was modified in the last 30 seconds
+fn has_active_subagents(project_dir: &Path, session_id: &str) -> bool {
+    let subagents_dir = project_dir.join(session_id).join("subagents");
+    let entries = match fs::read_dir(&subagents_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".jsonl") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(mtime) = meta.modified() {
+                if let Ok(age) = now.duration_since(mtime) {
+                    if age.as_secs() < 30 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check old-style flat agent files
+    let entries = match fs::read_dir(project_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(mtime) = meta.modified() {
+                if let Ok(age) = now.duration_since(mtime) {
+                    if age.as_secs() < 30 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Convert a cwd like "/home/meros/git/personal/baton" to
@@ -156,6 +215,7 @@ fn parse_session_file(path: &Path) -> Option<SessionData> {
         last_activity,
         last_doing,
         repeated_edits,
+        has_active_subagents: false, // set by caller after checking subagent files
         activity_log,
     })
 }

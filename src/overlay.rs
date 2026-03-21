@@ -1,4 +1,4 @@
-use baton::{gather_sessions, shorten_path, sway, truncate, SessionInfo};
+use baton::{gather_sessions, sway, truncate, SessionInfo};
 use glib::timeout_add_seconds_local;
 use gtk4::prelude::*;
 use gtk4::{
@@ -33,27 +33,10 @@ fn build_ui(app: &Application) {
     let titlebar = gtk4::Box::new(Orientation::Horizontal, 4);
     titlebar.add_css_class("baton-titlebar");
 
-    let title_label = Label::new(Some("BATON"));
-    titlebar.append(&title_label);
-
-    // Compact dots (visible when collapsed)
+    // Compact dots — the collapsed view (just the dots, nothing else)
     let dots_label = Label::new(Some(""));
     dots_label.add_css_class("baton-dots");
     titlebar.append(&dots_label);
-
-    let spacer = gtk4::Box::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    titlebar.append(&spacer);
-
-    // Close button
-    let close_btn = gtk4::Button::with_label("×");
-    close_btn.add_css_class("baton-close");
-    close_btn.connect_clicked(|btn| {
-        if let Some(w) = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok()) {
-            w.close();
-        }
-    });
-    titlebar.append(&close_btn);
 
     inner.append(&titlebar);
 
@@ -73,35 +56,6 @@ fn build_ui(app: &Application) {
     body.append(&footer);
 
     inner.append(&body);
-
-    // Auto-collapse timer: incremented each second, resets on click
-    let collapse_counter = Rc::new(Cell::new(0u32));
-
-    // Click titlebar to expand, auto-collapse after N seconds
-    let body_expand = body.clone();
-    let counter_reset = collapse_counter.clone();
-    let click = gtk4::GestureClick::new();
-    click.connect_released(move |_, _, _, _| {
-        let is_visible = body_expand.is_visible();
-        body_expand.set_visible(!is_visible);
-        counter_reset.set(0);
-    });
-    titlebar.add_controller(click);
-    titlebar.set_cursor_from_name(Some("pointer"));
-
-    // Auto-collapse timer (every second)
-    let body_collapse = body.clone();
-    let counter_tick = collapse_counter.clone();
-    glib::timeout_add_seconds_local(1, move || {
-        if body_collapse.is_visible() {
-            let count = counter_tick.get() + 1;
-            counter_tick.set(count);
-            if count >= AUTO_COLLAPSE_SECS {
-                body_collapse.set_visible(false);
-            }
-        }
-        glib::ControlFlow::Continue
-    });
 
     let window = gtk4::Window::builder()
         .application(app)
@@ -123,6 +77,70 @@ fn build_ui(app: &Application) {
     load_css();
     update_sessions(&session_list, &dots_label, &footer_label);
 
+    // Track hover state — don't collapse while pointer is over the widget
+    let is_hovered = Rc::new(Cell::new(false));
+    let hover = gtk4::EventControllerMotion::new();
+    let hovered_enter = is_hovered.clone();
+    hover.connect_enter(move |_, _, _| {
+        hovered_enter.set(true);
+    });
+    let hovered_leave = is_hovered.clone();
+    hover.connect_leave(move |_| {
+        hovered_leave.set(false);
+    });
+    outer.add_controller(hover);
+
+    // Auto-collapse timer
+    let collapse_counter = Rc::new(Cell::new(0u32));
+
+    // Helper to set body visibility and resize window
+    let set_expanded = {
+        let body = body.clone();
+        let window = window.clone();
+        Rc::new(move |expanded: bool| {
+            body.set_visible(expanded);
+            // Reset to minimum so layer-shell re-fits to content
+            // Width: 1 = let GTK calculate from content, Height: 1 = shrink
+            window.set_default_size(if expanded { 520 } else { 1 }, 1);
+            window.queue_resize();
+        })
+    };
+
+    // Click titlebar to toggle expand
+    let counter_reset = collapse_counter.clone();
+    let set_expanded_click = set_expanded.clone();
+    let body_ref = body.clone();
+    let click = gtk4::GestureClick::new();
+    click.connect_released(move |_, _, _, _| {
+        let is_visible = body_ref.is_visible();
+        set_expanded_click(!is_visible);
+        counter_reset.set(0);
+    });
+    titlebar.add_controller(click);
+    titlebar.set_cursor_from_name(Some("pointer"));
+
+    // Auto-collapse timer (every second)
+    let counter_tick = collapse_counter.clone();
+    let set_expanded_timer = set_expanded.clone();
+    let body_timer = body.clone();
+    let hovered_tick = is_hovered.clone();
+    glib::timeout_add_seconds_local(1, move || {
+        if body_timer.is_visible() {
+            if hovered_tick.get() {
+                // Reset counter while hovered
+                counter_tick.set(0);
+            } else {
+                let count = counter_tick.get() + 1;
+                counter_tick.set(count);
+            }
+            if counter_tick.get() >= AUTO_COLLAPSE_SECS {
+                set_expanded_timer(false);
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+
+    // Periodic data refresh
     let session_list = Rc::new(RefCell::new(session_list));
     let dots_label = Rc::new(RefCell::new(dots_label));
     let footer_label = Rc::new(RefCell::new(footer_label));
@@ -171,14 +189,7 @@ fn update_sessions(session_list: &gtk4::Box, dots_label: &Label, footer_label: &
         empty.append(&label);
         session_list.append(&empty);
     } else {
-        // Build compact dots string for collapsed view: "● ● ○"
-        let dots: String = sessions
-            .iter()
-            .map(|s| s.status.dot())
-            .collect::<Vec<_>>()
-            .join(" ");
         dots_label.set_markup(&format_dots_markup(&sessions));
-        let _ = dots; // used via format_dots_markup
 
         for session in &sessions {
             let row = build_session_row(session);
@@ -214,9 +225,10 @@ fn build_session_row(session: &SessionInfo) -> gtk4::Box {
         row.add_css_class(&format!("task{t}"));
     }
 
-    // Top line: task badge + status dot + name + status label + pwd
+    // Top line: task badge + status dot + task description + status label
     let top = gtk4::Box::new(Orientation::Horizontal, 6);
 
+    // Task badge
     let task_text = session
         .task_num
         .map(|t| format!("T{t}"))
@@ -225,29 +237,33 @@ fn build_session_row(session: &SessionInfo) -> gtk4::Box {
     task_label.add_css_class("session-task");
     top.append(&task_label);
 
+    // Status dot
     let dot = Label::new(Some(session.status.dot()));
     dot.add_css_class("status-dot");
     dot.add_css_class(session.status.css_class());
     top.append(&dot);
 
-    let name = Label::new(Some(&truncate(&session.name, 20)));
+    // Task description (primary) or session name (fallback)
+    let display_name = session
+        .task_name
+        .as_deref()
+        .filter(|n| !n.starts_with("Task ")) // skip generic "Task N"
+        .unwrap_or(&session.name);
+    let name = Label::new(Some(&truncate(display_name, 40)));
     name.add_css_class("session-name");
     name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     top.append(&name);
 
-    let status_text = Label::new(Some(&session.status.label()));
-    status_text.add_css_class("status-label");
-    status_text.add_css_class(session.status.css_class());
-    top.append(&status_text);
-
+    // Spacer
     let spacer = gtk4::Box::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     top.append(&spacer);
 
-    let pwd = Label::new(Some(&shorten_path(&session.cwd, 24)));
-    pwd.add_css_class("session-pwd");
-    pwd.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
-    top.append(&pwd);
+    // Status label
+    let status_text = Label::new(Some(&session.status.label()));
+    status_text.add_css_class("status-label");
+    status_text.add_css_class(session.status.css_class());
+    top.append(&status_text);
 
     row.append(&top);
 
