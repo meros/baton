@@ -1,0 +1,225 @@
+/*
+ * baton-overlay.css — GTK4 theme for the baton session overlay
+ * Two-line rows: top = task + name + status, bottom = what it's doing
+ */
+
+/* ── Window ────────────────────────────────────────────────────────────── */
+
+window,
+window.background,
+window.baton-window,
+.baton-window {
+    background-color: transparent;
+    background: none;
+}
+
+.baton-container {
+    background-color: alpha(#111118, 0.90);
+    border-radius: 10px;
+    border: 1px solid alpha(#ffffff, 0.07);
+}
+
+.baton-inner {
+    border-radius: 9px;
+}
+
+/* ── Title bar ─────────────────────────────────────────────────────────── */
+
+.baton-titlebar {
+    background-color: alpha(#ffffff, 0.03);
+    border-bottom: 1px solid alpha(#ffffff, 0.06);
+    padding: 6px 12px 5px 12px;
+    border-radius: 9px 9px 0 0;
+}
+
+.baton-titlebar label {
+    font-family: "Inter", "Segoe UI", sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: alpha(#a0a0b8, 0.70);
+}
+
+.baton-title-count {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 10px;
+    font-weight: 400;
+    color: alpha(#6060a0, 0.80);
+    padding-left: 4px;
+}
+
+.baton-close,
+.baton-toggle {
+    background: none;
+    border: none;
+    box-shadow: none;
+    min-width: 18px;
+    min-height: 18px;
+    padding: 0 3px;
+    font-size: 12px;
+    font-weight: 700;
+    color: alpha(#a0a0b8, 0.40);
+    transition: color 120ms ease;
+}
+
+.baton-close:hover {
+    color: alpha(#ff5f5f, 0.90);
+}
+
+.baton-toggle:hover {
+    color: alpha(#a0a0b8, 0.80);
+}
+
+/* ── Session rows (two-line layout) ────────────────────────────────────── */
+
+.session-row {
+    padding: 5px 12px 5px 12px;
+    border-bottom: 1px solid alpha(#ffffff, 0.035);
+    transition: background-color 120ms ease;
+}
+
+.session-row:last-child {
+    border-bottom: none;
+}
+
+.session-row:hover {
+    background-color: alpha(#ffffff, 0.05);
+}
+
+/* Task badge */
+.session-task {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 10px;
+    font-weight: 700;
+    color: alpha(#8888cc, 0.80);
+    min-width: 24px;
+}
+
+/* Per-task colors */
+.task1 .session-task { color: #6ec1e4; }
+.task2 .session-task { color: #b48ead; }
+.task3 .session-task { color: #a3be8c; }
+.task4 .session-task { color: #ebcb8b; }
+
+/* Name — primary identifier */
+.session-name {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 11px;
+    font-weight: 500;
+    color: #d4d4e8;
+}
+
+/* PWD — secondary, right-aligned */
+.session-pwd {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 9.5px;
+    font-weight: 400;
+    color: alpha(#6a6a8a, 0.70);
+}
+
+/* Doing — the main information, second line */
+.session-doing {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 10.5px;
+    font-weight: 400;
+    color: alpha(#b0b0d0, 0.85);
+}
+
+/* ── Status indicators ─────────────────────────────────────────────────── */
+
+.status-dot {
+    font-size: 9px;
+    font-weight: 700;
+    min-width: 10px;
+}
+
+.status-label {
+    font-family: "Inter", sans-serif;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+}
+
+.status-working .status-dot,
+.status-working .status-label,
+.status-working.status-dot,
+.status-working.status-label {
+    color: #3ddc84;
+}
+
+.status-idle .status-dot,
+.status-idle .status-label,
+.status-idle.status-dot,
+.status-idle.status-label {
+    color: #f0b429;
+}
+
+.status-stuck .status-dot,
+.status-stuck .status-label,
+.status-stuck.status-dot,
+.status-stuck.status-label {
+    color: #ff5f5f;
+}
+
+.status-stopped .status-dot,
+.status-stopped .status-label,
+.status-stopped.status-dot,
+.status-stopped.status-label {
+    color: alpha(#6060a0, 0.50);
+}
+
+/* ── Row-level status accents ──────────────────────────────────────────── */
+
+.session-row.status-working {
+    border-left: 2px solid alpha(#3ddc84, 0.35);
+    padding-left: 10px;
+}
+
+.session-row.status-idle {
+    border-left: 2px solid alpha(#f0b429, 0.35);
+    padding-left: 10px;
+}
+
+.session-row.status-stuck {
+    border-left: 2px solid alpha(#ff5f5f, 0.50);
+    padding-left: 10px;
+    background-color: alpha(#ff3030, 0.04);
+}
+
+.session-row.status-stuck:hover {
+    background-color: alpha(#ff3030, 0.09);
+}
+
+.session-row.status-stopped {
+    border-left: 2px solid alpha(#6060a0, 0.15);
+    padding-left: 10px;
+    opacity: 0.55;
+}
+
+/* ── Empty state ───────────────────────────────────────────────────────── */
+
+.baton-empty {
+    padding: 14px 12px;
+}
+
+.baton-empty label {
+    font-family: "Inter", sans-serif;
+    font-size: 11px;
+    color: alpha(#6060a0, 0.60);
+    font-style: italic;
+}
+
+/* ── Footer ────────────────────────────────────────────────────────────── */
+
+.baton-footer {
+    background-color: alpha(#ffffff, 0.02);
+    border-top: 1px solid alpha(#ffffff, 0.04);
+    padding: 3px 12px;
+    border-radius: 0 0 9px 9px;
+}
+
+.baton-footer label {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px;
+    color: alpha(#5050a0, 0.55);
+}
