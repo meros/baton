@@ -48,8 +48,14 @@ window.baton-window,
     padding-left: 4px;
 }
 
-.baton-close,
-.baton-toggle {
+/* Compact dots shown when collapsed */
+.baton-dots {
+    font-size: 10px;
+    padding-left: 4px;
+    letter-spacing: 0.15em;
+}
+
+.baton-close {
     background: none;
     border: none;
     box-shadow: none;
@@ -64,10 +70,6 @@ window.baton-window,
 
 .baton-close:hover {
     color: alpha(#ff5f5f, 0.90);
-}
-
-.baton-toggle:hover {
-    color: alpha(#a0a0b8, 0.80);
 }
 
 /* ── Session rows (two-line layout) ────────────────────────────────────── */

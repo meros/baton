@@ -6,10 +6,11 @@ use gtk4::{
     Orientation, STYLE_PROVIDER_PRIORITY_USER,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 const CSS: &str = include_str!("../baton-overlay.css");
+const AUTO_COLLAPSE_SECS: u32 = 5;
 
 fn main() -> glib::ExitCode {
     let app = Application::builder()
@@ -29,24 +30,20 @@ fn build_ui(app: &Application) {
     outer.append(&inner);
 
     // Title bar
-    let titlebar = gtk4::Box::new(Orientation::Horizontal, 6);
+    let titlebar = gtk4::Box::new(Orientation::Horizontal, 4);
     titlebar.add_css_class("baton-titlebar");
 
     let title_label = Label::new(Some("BATON"));
     titlebar.append(&title_label);
 
-    let count_label = Label::new(Some(""));
-    count_label.add_css_class("baton-title-count");
-    titlebar.append(&count_label);
+    // Compact dots (visible when collapsed)
+    let dots_label = Label::new(Some(""));
+    dots_label.add_css_class("baton-dots");
+    titlebar.append(&dots_label);
 
     let spacer = gtk4::Box::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     titlebar.append(&spacer);
-
-    // Collapse/expand toggle
-    let toggle_btn = gtk4::Button::with_label("▾");
-    toggle_btn.add_css_class("baton-toggle");
-    titlebar.append(&toggle_btn);
 
     // Close button
     let close_btn = gtk4::Button::with_label("×");
@@ -60,9 +57,10 @@ fn build_ui(app: &Application) {
 
     inner.append(&titlebar);
 
-    // Collapsible body
+    // Expandable body
     let body = gtk4::Box::new(Orientation::Vertical, 0);
     body.add_css_class("baton-body");
+    body.set_visible(false); // start collapsed
 
     let session_list = gtk4::Box::new(Orientation::Vertical, 0);
     session_list.add_css_class("session-list");
@@ -76,13 +74,33 @@ fn build_ui(app: &Application) {
 
     inner.append(&body);
 
-    // Collapse toggle
-    let body_clone = body.clone();
-    let toggle_btn_clone = toggle_btn.clone();
-    toggle_btn.connect_clicked(move |_| {
-        let visible = body_clone.is_visible();
-        body_clone.set_visible(!visible);
-        toggle_btn_clone.set_label(if visible { "▸" } else { "▾" });
+    // Auto-collapse timer: incremented each second, resets on click
+    let collapse_counter = Rc::new(Cell::new(0u32));
+
+    // Click titlebar to expand, auto-collapse after N seconds
+    let body_expand = body.clone();
+    let counter_reset = collapse_counter.clone();
+    let click = gtk4::GestureClick::new();
+    click.connect_released(move |_, _, _, _| {
+        let is_visible = body_expand.is_visible();
+        body_expand.set_visible(!is_visible);
+        counter_reset.set(0);
+    });
+    titlebar.add_controller(click);
+    titlebar.set_cursor_from_name(Some("pointer"));
+
+    // Auto-collapse timer (every second)
+    let body_collapse = body.clone();
+    let counter_tick = collapse_counter.clone();
+    glib::timeout_add_seconds_local(1, move || {
+        if body_collapse.is_visible() {
+            let count = counter_tick.get() + 1;
+            counter_tick.set(count);
+            if count >= AUTO_COLLAPSE_SECS {
+                body_collapse.set_visible(false);
+            }
+        }
+        glib::ControlFlow::Continue
     });
 
     let window = gtk4::Window::builder()
@@ -90,14 +108,9 @@ fn build_ui(app: &Application) {
         .child(&outer)
         .build();
 
-    // Make window background fully transparent so rounded corners show through
     window.add_css_class("baton-window");
-
-    // Near-unity opacity forces compositor alpha blending so the
-    // transparent window background composites correctly (Sway #8904).
     window.set_opacity(0.999);
 
-    // Layer shell — sticky on all workspaces by default
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("baton"));
@@ -108,16 +121,16 @@ fn build_ui(app: &Application) {
     window.set_keyboard_mode(KeyboardMode::None);
 
     load_css();
-    update_sessions(&session_list, &count_label, &footer_label);
+    update_sessions(&session_list, &dots_label, &footer_label);
 
     let session_list = Rc::new(RefCell::new(session_list));
-    let count_label = Rc::new(RefCell::new(count_label));
+    let dots_label = Rc::new(RefCell::new(dots_label));
     let footer_label = Rc::new(RefCell::new(footer_label));
 
     timeout_add_seconds_local(2, move || {
         update_sessions(
             &session_list.borrow(),
-            &count_label.borrow(),
+            &dots_label.borrow(),
             &footer_label.borrow(),
         );
         glib::ControlFlow::Continue
@@ -137,7 +150,7 @@ fn load_css() {
     );
 }
 
-fn update_sessions(session_list: &gtk4::Box, count_label: &Label, footer_label: &Label) {
+fn update_sessions(session_list: &gtk4::Box, dots_label: &Label, footer_label: &Label) {
     while let Some(child) = session_list.first_child() {
         session_list.remove(&child);
     }
@@ -145,24 +158,28 @@ fn update_sessions(session_list: &gtk4::Box, count_label: &Label, footer_label: 
     let sessions = match gather_sessions() {
         Ok(s) => s,
         Err(_) => {
-            let empty = gtk4::Box::new(Orientation::Horizontal, 0);
-            empty.add_css_class("baton-empty");
-            let label = Label::new(Some("Error scanning sessions"));
-            empty.append(&label);
-            session_list.append(&empty);
+            dots_label.set_text("?");
             return;
         }
     };
 
     if sessions.is_empty() {
-        count_label.set_text("0");
+        dots_label.set_text("");
         let empty = gtk4::Box::new(Orientation::Horizontal, 0);
         empty.add_css_class("baton-empty");
         let label = Label::new(Some("No active Claude Code sessions"));
         empty.append(&label);
         session_list.append(&empty);
     } else {
-        count_label.set_text(&format!("{}", sessions.len()));
+        // Build compact dots string for collapsed view: "● ● ○"
+        let dots: String = sessions
+            .iter()
+            .map(|s| s.status.dot())
+            .collect::<Vec<_>>()
+            .join(" ");
+        dots_label.set_markup(&format_dots_markup(&sessions));
+        let _ = dots; // used via format_dots_markup
+
         for session in &sessions {
             let row = build_session_row(session);
             session_list.append(&row);
@@ -171,6 +188,21 @@ fn update_sessions(session_list: &gtk4::Box, count_label: &Label, footer_label: 
 
     let now = chrono::Local::now();
     footer_label.set_text(&format!("updated {}", now.format("%H:%M:%S")));
+}
+
+/// Build colored dots markup for the title bar
+fn format_dots_markup(sessions: &[SessionInfo]) -> String {
+    let mut parts = Vec::new();
+    for s in sessions {
+        let (color, dot) = match &s.status {
+            baton::SessionStatus::Working => ("#3ddc84", "●"),
+            baton::SessionStatus::Idle(_) => ("#f0b429", "○"),
+            baton::SessionStatus::Stuck => ("#ff5f5f", "⚠"),
+            baton::SessionStatus::Stopped => ("#6060a0", "◌"),
+        };
+        parts.push(format!("<span foreground=\"{color}\">{dot}</span>"));
+    }
+    parts.join(" ")
 }
 
 fn build_session_row(session: &SessionInfo) -> gtk4::Box {
@@ -182,10 +214,9 @@ fn build_session_row(session: &SessionInfo) -> gtk4::Box {
         row.add_css_class(&format!("task{t}"));
     }
 
-    // Top line: task badge + name + status
+    // Top line: task badge + status dot + name + status label + pwd
     let top = gtk4::Box::new(Orientation::Horizontal, 6);
 
-    // Task badge
     let task_text = session
         .task_num
         .map(|t| format!("T{t}"))
@@ -194,30 +225,25 @@ fn build_session_row(session: &SessionInfo) -> gtk4::Box {
     task_label.add_css_class("session-task");
     top.append(&task_label);
 
-    // Status dot
     let dot = Label::new(Some(session.status.dot()));
     dot.add_css_class("status-dot");
     dot.add_css_class(session.status.css_class());
     top.append(&dot);
 
-    // Name (session/branch)
     let name = Label::new(Some(&truncate(&session.name, 20)));
     name.add_css_class("session-name");
     name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     top.append(&name);
 
-    // Status label
     let status_text = Label::new(Some(&session.status.label()));
     status_text.add_css_class("status-label");
     status_text.add_css_class(session.status.css_class());
     top.append(&status_text);
 
-    // Spacer
     let spacer = gtk4::Box::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     top.append(&spacer);
 
-    // PWD (small, right-aligned)
     let pwd = Label::new(Some(&shorten_path(&session.cwd, 24)));
     pwd.add_css_class("session-pwd");
     pwd.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
@@ -225,13 +251,13 @@ fn build_session_row(session: &SessionInfo) -> gtk4::Box {
 
     row.append(&top);
 
-    // Bottom line: what it's doing (the main info)
+    // Bottom line: what it's doing
     if !session.doing.is_empty() {
         let doing = Label::new(Some(&truncate(&session.doing, 70)));
         doing.add_css_class("session-doing");
         doing.set_xalign(0.0);
         doing.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        doing.set_margin_start(32); // indent past task badge
+        doing.set_margin_start(32);
         row.append(&doing);
     }
 
