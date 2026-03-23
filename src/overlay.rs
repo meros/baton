@@ -21,7 +21,76 @@ fn main() -> glib::ExitCode {
     app.run()
 }
 
+/// Shared state that all per-monitor windows reference for session data updates.
+struct SharedState {
+    session_lists: Vec<gtk4::Box>,
+    dots_labels: Vec<Label>,
+    footer_labels: Vec<Label>,
+}
+
 fn build_ui(app: &Application) {
+    let display = Display::default().expect("Could not get default display");
+    let monitors = display.monitors();
+
+    load_css();
+
+    let shared = Rc::new(RefCell::new(SharedState {
+        session_lists: Vec::new(),
+        dots_labels: Vec::new(),
+        footer_labels: Vec::new(),
+    }));
+
+    // Create a window for each existing monitor
+    let n = monitors.n_items();
+    for i in 0..n {
+        let monitor = monitors.item(i).and_downcast::<gtk4::gdk::Monitor>().unwrap();
+        create_monitor_window(app, &monitor, &shared);
+    }
+
+    // Handle monitors being added
+    let app_added = app.clone();
+    let shared_added = shared.clone();
+    monitors.connect_items_changed(move |list, position, removed, added| {
+        // Remove widgets for removed monitors (they'll be destroyed with their windows)
+        if removed > 0 {
+            let mut state = shared_added.borrow_mut();
+            // Remove entries from the end to avoid index shifting issues
+            // The removed monitors were at `position..position+removed`
+            for i in (position..position + removed).rev() {
+                let idx = i as usize;
+                if idx < state.session_lists.len() {
+                    state.session_lists.remove(idx);
+                    state.dots_labels.remove(idx);
+                    state.footer_labels.remove(idx);
+                }
+            }
+        }
+        // Add windows for new monitors
+        for i in position..position + added {
+            if let Some(monitor) = list.item(i).and_downcast::<gtk4::gdk::Monitor>() {
+                create_monitor_window(&app_added, &monitor, &shared_added);
+            }
+        }
+    });
+
+    // Periodic data refresh — updates all windows at once
+    let shared_refresh = shared.clone();
+    timeout_add_seconds_local(2, move || {
+        let state = shared_refresh.borrow();
+        update_all_sessions(&state);
+        glib::ControlFlow::Continue
+    });
+
+    // Initial data load
+    let state = shared.borrow();
+    update_all_sessions(&state);
+}
+
+fn create_monitor_window(
+    app: &Application,
+    monitor: &gtk4::gdk::Monitor,
+    shared: &Rc<RefCell<SharedState>>,
+) {
     let outer = gtk4::Box::new(Orientation::Vertical, 0);
     outer.add_css_class("baton-container");
 
@@ -33,7 +102,6 @@ fn build_ui(app: &Application) {
     let titlebar = gtk4::Box::new(Orientation::Horizontal, 4);
     titlebar.add_css_class("baton-titlebar");
 
-    // Compact dots — the collapsed view (just the dots, nothing else)
     let dots_label = Label::new(Some(""));
     dots_label.add_css_class("baton-dots");
     titlebar.append(&dots_label);
@@ -43,7 +111,7 @@ fn build_ui(app: &Application) {
     // Expandable body
     let body = gtk4::Box::new(Orientation::Vertical, 0);
     body.add_css_class("baton-body");
-    body.set_visible(false); // start collapsed
+    body.set_visible(false);
 
     let session_list = gtk4::Box::new(Orientation::Vertical, 0);
     session_list.add_css_class("session-list");
@@ -68,16 +136,14 @@ fn build_ui(app: &Application) {
     window.init_layer_shell();
     window.set_layer(Layer::Overlay);
     window.set_namespace(Some("baton"));
+    window.set_monitor(Some(monitor));
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Right, true);
     window.set_margin(Edge::Top, 8);
     window.set_margin(Edge::Right, 8);
     window.set_keyboard_mode(KeyboardMode::None);
 
-    load_css();
-    update_sessions(&session_list, &dots_label, &footer_label);
-
-    // Track hover state — don't collapse while pointer is over the widget
+    // Track hover state
     let is_hovered = Rc::new(Cell::new(false));
     let hover = gtk4::EventControllerMotion::new();
     let hovered_enter = is_hovered.clone();
@@ -93,14 +159,11 @@ fn build_ui(app: &Application) {
     // Auto-collapse timer
     let collapse_counter = Rc::new(Cell::new(0u32));
 
-    // Helper to set body visibility and resize window
     let set_expanded = {
         let body = body.clone();
         let window = window.clone();
         Rc::new(move |expanded: bool| {
             body.set_visible(expanded);
-            // Reset to minimum so layer-shell re-fits to content
-            // Width: 1 = let GTK calculate from content, Height: 1 = shrink
             window.set_default_size(if expanded { 520 } else { 1 }, 1);
             window.queue_resize();
         })
@@ -127,7 +190,6 @@ fn build_ui(app: &Application) {
     glib::timeout_add_seconds_local(1, move || {
         if body_timer.is_visible() {
             if hovered_tick.get() {
-                // Reset counter while hovered
                 counter_tick.set(0);
             } else {
                 let count = counter_tick.get() + 1;
@@ -140,21 +202,58 @@ fn build_ui(app: &Application) {
         glib::ControlFlow::Continue
     });
 
-    // Periodic data refresh
-    let session_list = Rc::new(RefCell::new(session_list));
-    let dots_label = Rc::new(RefCell::new(dots_label));
-    let footer_label = Rc::new(RefCell::new(footer_label));
-
-    timeout_add_seconds_local(2, move || {
-        update_sessions(
-            &session_list.borrow(),
-            &dots_label.borrow(),
-            &footer_label.borrow(),
-        );
-        glib::ControlFlow::Continue
-    });
+    // Register in shared state
+    {
+        let mut state = shared.borrow_mut();
+        state.session_lists.push(session_list);
+        state.dots_labels.push(dots_label);
+        state.footer_labels.push(footer_label);
+    }
 
     window.present();
+}
+
+fn update_all_sessions(state: &SharedState) {
+    let sessions = match gather_sessions() {
+        Ok(s) => s,
+        Err(_) => {
+            for dots in &state.dots_labels {
+                dots.set_text("?");
+            }
+            return;
+        }
+    };
+
+    let now = chrono::Local::now();
+    let timestamp = format!("updated {}", now.format("%H:%M:%S"));
+
+    for i in 0..state.session_lists.len() {
+        update_session_widgets(&state.session_lists[i], &state.dots_labels[i], &state.footer_labels[i], &sessions, &timestamp);
+    }
+}
+
+fn update_session_widgets(session_list: &gtk4::Box, dots_label: &Label, footer_label: &Label, sessions: &[SessionInfo], timestamp: &str) {
+    while let Some(child) = session_list.first_child() {
+        session_list.remove(&child);
+    }
+
+    if sessions.is_empty() {
+        dots_label.set_text("");
+        let empty = gtk4::Box::new(Orientation::Horizontal, 0);
+        empty.add_css_class("baton-empty");
+        let label = Label::new(Some("No active Claude Code sessions"));
+        empty.append(&label);
+        session_list.append(&empty);
+    } else {
+        dots_label.set_markup(&format_dots_markup(sessions));
+
+        for session in sessions {
+            let row = build_session_row(session);
+            session_list.append(&row);
+        }
+    }
+
+    footer_label.set_text(timestamp);
 }
 
 fn load_css() {
@@ -166,39 +265,6 @@ fn load_css() {
         &provider,
         STYLE_PROVIDER_PRIORITY_USER,
     );
-}
-
-fn update_sessions(session_list: &gtk4::Box, dots_label: &Label, footer_label: &Label) {
-    while let Some(child) = session_list.first_child() {
-        session_list.remove(&child);
-    }
-
-    let sessions = match gather_sessions() {
-        Ok(s) => s,
-        Err(_) => {
-            dots_label.set_text("?");
-            return;
-        }
-    };
-
-    if sessions.is_empty() {
-        dots_label.set_text("");
-        let empty = gtk4::Box::new(Orientation::Horizontal, 0);
-        empty.add_css_class("baton-empty");
-        let label = Label::new(Some("No active Claude Code sessions"));
-        empty.append(&label);
-        session_list.append(&empty);
-    } else {
-        dots_label.set_markup(&format_dots_markup(&sessions));
-
-        for session in &sessions {
-            let row = build_session_row(session);
-            session_list.append(&row);
-        }
-    }
-
-    let now = chrono::Local::now();
-    footer_label.set_text(&format!("updated {}", now.format("%H:%M:%S")));
 }
 
 /// Build colored dots markup for the title bar
