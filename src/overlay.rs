@@ -7,6 +7,7 @@ use gtk4::{
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 const CSS: &str = include_str!("../baton-overlay.css");
@@ -17,15 +18,39 @@ fn main() -> glib::ExitCode {
         .application_id("dev.baton.overlay")
         .build();
 
-    app.connect_activate(build_ui);
+    // Use connect_activate only once via a flag to prevent duplicate setup
+    // on re-activation (e.g. second launch attempt with same app ID).
+    let activated = Rc::new(Cell::new(false));
+    app.connect_activate(move |app| {
+        if activated.get() {
+            return;
+        }
+        activated.set(true);
+        build_ui(app);
+    });
     app.run()
 }
 
-/// Shared state that all per-monitor windows reference for session data updates.
+/// Per-monitor widget set.
+struct MonitorWidgets {
+    session_list: gtk4::Box,
+    dots_label: Label,
+    footer_label: Label,
+    window: gtk4::Window,
+}
+
+/// Shared state keyed by monitor connector name — guarantees one overlay per output.
 struct SharedState {
-    session_lists: Vec<gtk4::Box>,
-    dots_labels: Vec<Label>,
-    footer_labels: Vec<Label>,
+    windows: HashMap<String, MonitorWidgets>,
+}
+
+/// Get a stable identifier for a monitor. Prefer connector name, fall back to
+/// a description-based key so we never silently skip a monitor.
+fn monitor_key(monitor: &gtk4::gdk::Monitor) -> String {
+    monitor
+        .connector()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| format!("unknown-{:?}", monitor.geometry()))
 }
 
 fn build_ui(app: &Application) {
@@ -35,42 +60,21 @@ fn build_ui(app: &Application) {
     load_css();
 
     let shared = Rc::new(RefCell::new(SharedState {
-        session_lists: Vec::new(),
-        dots_labels: Vec::new(),
-        footer_labels: Vec::new(),
+        windows: HashMap::new(),
     }));
 
     // Create a window for each existing monitor
     let n = monitors.n_items();
     for i in 0..n {
         let monitor = monitors.item(i).and_downcast::<gtk4::gdk::Monitor>().unwrap();
-        create_monitor_window(app, &monitor, &shared);
+        ensure_monitor_window(app, &monitor, &shared);
     }
 
-    // Handle monitors being added
-    let app_added = app.clone();
-    let shared_added = shared.clone();
-    monitors.connect_items_changed(move |list, position, removed, added| {
-        // Remove widgets for removed monitors (they'll be destroyed with their windows)
-        if removed > 0 {
-            let mut state = shared_added.borrow_mut();
-            // Remove entries from the end to avoid index shifting issues
-            // The removed monitors were at `position..position+removed`
-            for i in (position..position + removed).rev() {
-                let idx = i as usize;
-                if idx < state.session_lists.len() {
-                    state.session_lists.remove(idx);
-                    state.dots_labels.remove(idx);
-                    state.footer_labels.remove(idx);
-                }
-            }
-        }
-        // Add windows for new monitors
-        for i in position..position + added {
-            if let Some(monitor) = list.item(i).and_downcast::<gtk4::gdk::Monitor>() {
-                create_monitor_window(&app_added, &monitor, &shared_added);
-            }
-        }
+    // Sync windows when monitors change
+    let app_weak = app.clone();
+    let shared_changed = shared.clone();
+    monitors.connect_items_changed(move |list, _position, _removed, _added| {
+        sync_monitors(&app_weak, list, &shared_changed);
     });
 
     // Periodic data refresh — updates all windows at once
@@ -86,11 +90,48 @@ fn build_ui(app: &Application) {
     update_all_sessions(&state);
 }
 
-fn create_monitor_window(
+/// Reconcile overlay windows with the current set of monitors.
+/// Adds windows for new monitors, removes windows for disconnected ones.
+fn sync_monitors(
+    app: &Application,
+    monitor_list: &gtk4::gio::ListModel,
+    shared: &Rc<RefCell<SharedState>>,
+) {
+    let mut current_keys = std::collections::HashSet::new();
+    let n = monitor_list.n_items();
+    for i in 0..n {
+        if let Some(monitor) = monitor_list.item(i).and_downcast::<gtk4::gdk::Monitor>() {
+            let key = monitor_key(&monitor);
+            current_keys.insert(key);
+            ensure_monitor_window(app, &monitor, shared);
+        }
+    }
+
+    // Remove windows for monitors that no longer exist
+    let mut state = shared.borrow_mut();
+    let stale: Vec<String> = state
+        .windows
+        .keys()
+        .filter(|k| !current_keys.contains(*k))
+        .cloned()
+        .collect();
+    for key in stale {
+        if let Some(widgets) = state.windows.remove(&key) {
+            widgets.window.close();
+        }
+    }
+}
+
+/// Create an overlay window for a monitor, but only if one doesn't already exist.
+fn ensure_monitor_window(
     app: &Application,
     monitor: &gtk4::gdk::Monitor,
     shared: &Rc<RefCell<SharedState>>,
 ) {
+    let key = monitor_key(monitor);
+    if shared.borrow().windows.contains_key(&key) {
+        return;
+    }
     let outer = gtk4::Box::new(Orientation::Vertical, 0);
     outer.add_css_class("baton-container");
 
@@ -202,12 +243,15 @@ fn create_monitor_window(
         glib::ControlFlow::Continue
     });
 
-    // Register in shared state
+    // Register in shared state keyed by monitor connector
     {
         let mut state = shared.borrow_mut();
-        state.session_lists.push(session_list);
-        state.dots_labels.push(dots_label);
-        state.footer_labels.push(footer_label);
+        state.windows.insert(key, MonitorWidgets {
+            session_list,
+            dots_label,
+            footer_label,
+            window: window.clone(),
+        });
     }
 
     window.present();
@@ -217,8 +261,8 @@ fn update_all_sessions(state: &SharedState) {
     let sessions = match gather_sessions() {
         Ok(s) => s,
         Err(_) => {
-            for dots in &state.dots_labels {
-                dots.set_text("?");
+            for widgets in state.windows.values() {
+                widgets.dots_label.set_text("?");
             }
             return;
         }
@@ -227,8 +271,8 @@ fn update_all_sessions(state: &SharedState) {
     let now = chrono::Local::now();
     let timestamp = format!("updated {}", now.format("%H:%M:%S"));
 
-    for i in 0..state.session_lists.len() {
-        update_session_widgets(&state.session_lists[i], &state.dots_labels[i], &state.footer_labels[i], &sessions, &timestamp);
+    for widgets in state.windows.values() {
+        update_session_widgets(&widgets.session_list, &widgets.dots_label, &widgets.footer_label, &sessions, &timestamp);
     }
 }
 
